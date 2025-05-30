@@ -9,13 +9,16 @@ import java.io.PrintWriter;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 class SequencePair {
     final long[] a;
     final long[] b;
     final String method;
+    final int n;
 
     private static long[] negateSeqInternal(long[] seq) {
         if (seq == null) return null;
@@ -24,8 +27,9 @@ class SequencePair {
         return res;
     }
 
-    SequencePair(long[] seqA, long[] seqB, String method) {
+    SequencePair(long[] seqA, long[] seqB, String method, int n) {
         this.method = method;
+        this.n = n;
 
         long[] currentA = Arrays.copyOf(seqA, seqA.length);
         long[] currentB = Arrays.copyOf(seqB, seqB.length);
@@ -63,21 +67,21 @@ class SequencePair {
 
     @Override
     public String toString() {
-        return "Pair(method=" + method + ", a=" + Arrays.toString(a) + ", b=" + Arrays.toString(b) + ")";
+        return "Pair(n=" + n + ", method=" + method + ", a=" + Arrays.toString(a) + ", b=" + Arrays.toString(b) + ")";
     }
 }
 
 public class Main {
-    static final int N_MIN = 222;
-    static final int N_MAX = 222;
+    static final int N_MIN = 50;
+    static final int N_MAX = 50;
     static final int THREADS = Runtime.getRuntime().availableProcessors();
     static final AtomicBoolean criticalErrorOccurred = new AtomicBoolean(false);
 
     static final int W_FALLBACK = 15_000;
     static final int M_BITS_FALLBACK = 14;
     static final int MAX_BUCKET_SIZE_FALLBACK = 50;
-    static final long FALLBACK_TIME_LIMIT_MS = 24L * 60 * 60 * 1000;
-    static final int MAX_UNIQUE_PAIRS_PER_N = 1;
+    static final long FALLBACK_TIME_LIMIT_MS = 24L * 60 * 60 * 1000; // 24 часа
+    static final int MAX_UNIQUE_PAIRS_PER_N = 1000;
     static final int MAX_CHECKS_PER_BUCKET_PAIR = 8000;
 
     static final boolean PSD_FILTER_ENABLED = true;
@@ -88,28 +92,28 @@ public class Main {
     private static final ThreadLocal<double[]> dataBufferThreadLocal = new ThreadLocal<>();
 
     private static int calculateK1(int v) {
-        System.out.println("calculateK1: " + v / 2);
-        return v / 2;
+        return v / 2 + 1;
     }
 
     public static void main(String[] args) {
         System.out.println("Цель: Найти порядок n = " + N_MIN + " как можно быстрее.");
         System.out.println("Используется потоков: " + THREADS);
-        System.out.println("Остановимся после нахождения " + MAX_UNIQUE_PAIRS_PER_N + " уникальной(-ых) пары (пар).");
+        System.out.println("Остановимся после нахождения " + MAX_UNIQUE_PAIRS_PER_N + " уникальной(-ых) пары (пар) для каждого N.");
         System.out.println("PSD фильтр: " + (PSD_FILTER_ENABLED ? "Включен" : "Выключен"));
         System.out.println("Результат будет записан в файл: " + OUTPUT_FILENAME);
         System.out.println("--------------------------------------------------");
 
         try (PrintWriter writer = new PrintWriter(new BufferedWriter(new FileWriter(OUTPUT_FILENAME)))) {
             writer.println("// VERSION: " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date()));
-            writer.println("// Поиск для n=" + N_MIN);
-            writer.println("\nn=" + N_MIN +"; example(n,0); \n");
+            writer.println("// Поиск для n=" + N_MIN + (N_MAX > N_MIN ? " до n=" + N_MAX : ""));
+            writer.println("\n// n=" + N_MIN +"; example(n,0); \n");
             writer.println("\nputs(\"a=[\"+a+\"];\"); puts(\"b=[\"+b+\"];\"); ");
             writer.println("H=twocircul(a,b); {{I=H'*H}} putm(I);");
             writer.println("plotm(H,'XR',140,20);\n");
             writer.println("function example(n, k) {");
+            writer.flush();
 
-            boolean firstNProcessed = true;
+            boolean firstNBlockWritten = true;
 
             for (int n_current = N_MIN; n_current <= N_MAX; n_current += 4) {
                 if (criticalErrorOccurred.get()) {
@@ -120,38 +124,58 @@ public class Main {
                 System.out.println("\nИщем уникальные пары для n = " + n_current);
                 long startTime = System.currentTimeMillis();
 
-                List<SequencePair> uniquePairsForN = findAllPairsDispatcher(n_current);
+                AtomicInteger jsKIndex = new AtomicInteger(0);
+                AtomicBoolean jsNBlockHeaderWritten = new AtomicBoolean(false);
 
-                long endTime = System.currentTimeMillis();
-
-                if (!uniquePairsForN.isEmpty()) {
-                    System.out.printf("+++ Найдена %d уникальная пара для n = %d за %.3f сек +++\n",
-                                      uniquePairsForN.size(), n_current, (endTime - startTime) / 1000.0);
-
-                    if (!firstNProcessed) writer.print("else ");
-                    writer.println("    if (n == " + n_current + ") {");
-
-                    for (int k_idx = 0; k_idx < uniquePairsForN.size(); k_idx++) {
-                        SequencePair pair = uniquePairsForN.get(k_idx);
-                        writer.println("        if (k == " + k_idx + ") {");
+                final boolean isFirstNOverall = firstNBlockWritten;
+                int finalN_current = n_current;
+                Consumer<SequencePair> jsPairWriter = (pair) -> {
+                    synchronized (writer) {
+                        if (!jsNBlockHeaderWritten.getAndSet(true)) {
+                            if (!isFirstNOverall) {
+                                writer.print("else ");
+                            }
+                            writer.println("    if (n == " + finalN_current + ") {");
+                        }
+                        writer.println("        if (k == " + jsKIndex.getAndIncrement() + ") {");
                         writeArrayToFileJS(writer, pair.a, "a");
                         writeArrayToFileJS(writer, pair.b, "b");
                         writer.println("        }");
+                        writer.flush();
                     }
-                    writer.println("    }");
-                    firstNProcessed = false;
-                    writer.flush();
+                };
+
+                List<SequencePair> foundPairsForN = findAllPairsDispatcher(n_current, jsPairWriter);
+
+                long endTime = System.currentTimeMillis();
+
+                synchronized (writer) {
+                    if (jsNBlockHeaderWritten.get()) {
+                        writer.println("    }");
+                        writer.flush();
+                        firstNBlockWritten = false;
+                    }
+                }
+
+                if (!foundPairsForN.isEmpty()) {
+                    System.out.printf("+++ Всего найдено %d уникальных пар для n = %d за %.3f сек +++\n",
+                                      foundPairsForN.size(), n_current, (endTime - startTime) / 1000.0);
                 } else {
                     System.out.println("--- Решения для n=" + n_current + " не найдены за отведенное время/попытки ---");
                 }
                 System.out.println("--------------------------------------------------");
-                if (MAX_UNIQUE_PAIRS_PER_N > 0 && !uniquePairsForN.isEmpty() && uniquePairsForN.size() >= MAX_UNIQUE_PAIRS_PER_N) {
-                    System.out.println("Цель достигнута (найдено " + uniquePairsForN.size() + " из " + MAX_UNIQUE_PAIRS_PER_N + " пар). Завершение.");
-                    break;
+
+                if (MAX_UNIQUE_PAIRS_PER_N > 0 && !foundPairsForN.isEmpty() && foundPairsForN.size() >= MAX_UNIQUE_PAIRS_PER_N) {
+                    System.out.println("Достигнут лимит пар (" + foundPairsForN.size() + ") для n=" + n_current + ". Переход к следующему N (если есть) или завершение.");
+                    if (n_current == N_MAX) {
+                        System.out.println("Цель достигнута для максимального N. Завершение.");
+                        break;
+                    }
                 }
             }
             writer.println();
             writer.println("}");
+            writer.flush();
 
         } catch (IOException e) {
             System.err.println("Ошибка записи в файл '" + OUTPUT_FILENAME + "': " + e.getMessage());
@@ -159,21 +183,21 @@ public class Main {
         }
 
         System.out.println("Поиск завершен. Результаты записаны в " + OUTPUT_FILENAME);
-        if (THREADS > 1) {
-            System.exit(0);
+        if (THREADS > 1 || criticalErrorOccurred.get()) {
+            System.exit(criticalErrorOccurred.get() ? 1 : 0);
         }
     }
 
-    static List<SequencePair> findAllPairsDispatcher(int n) {
+    static List<SequencePair> findAllPairsDispatcher(int n, Consumer<SequencePair> onPairFoundCallback) {
         System.out.println("  Запуск эвристического поиска для n=" + n + ":");
         System.out.print("  * Поиск (лимит времени: " + (FALLBACK_TIME_LIMIT_MS / 1000.0) + "s, до " + MAX_UNIQUE_PAIRS_PER_N + " пар)... ");
 
-        List<SequencePair> foundPairs = findPairsByRandomizedBucketing(n);
-        System.out.println("Найдено на данный момент: " + foundPairs.size());
+        List<SequencePair> foundPairs = findPairsByRandomizedBucketing(n, onPairFoundCallback);
+        System.out.println("Итого найдено для n=" + n + ": " + foundPairs.size());
         return foundPairs;
     }
 
-    static List<SequencePair> findPairsByRandomizedBucketing(int n) {
+    static List<SequencePair> findPairsByRandomizedBucketing(int n, Consumer<SequencePair> onPairFoundCallback) {
         Set<SequencePair> foundPairsSet = ConcurrentHashMap.newKeySet();
         int v = n / 2;
         if (v <= 0) {
@@ -181,7 +205,6 @@ public class Main {
             return new ArrayList<>();
         }
         int k1_target = calculateK1(v);
-        System.out.println("  Используем k1 = " + k1_target + " для генерации последовательностей длины v = " + v);
 
         AtomicLong totalAttempts = new AtomicLong(0);
         AtomicLong totalComparisons = new AtomicLong(0);
@@ -249,13 +272,16 @@ public class Main {
 
                                     totalComparisons.incrementAndGet();
                                     if (checkEulerPairCondition(dataA.paf(), dataB.paf(), v)) {
-                                        SequencePair foundPair = new SequencePair(dataA.sequence(), dataB.sequence(), "BucketSearch");
+                                        SequencePair foundPair = new SequencePair(dataA.sequence(), dataB.sequence(), "BucketSearch", n);
                                         boolean added = foundPairsSet.add(foundPair);
                                         if (added) {
-                                            System.out.printf("\n[n=%d, Thread %d] +++ Найдена пара! Всего найдено: %d. Попыток: %.2fM, Сравнений: %.1fM. PAF_A[0]=%d, PAF_B[0]=%d\n",
-                                                              n, threadId, foundPairsSet.size(),
+                                            System.out.printf("\n[n=%d, Thread %d] +++ Найдена пара! Всего для n=%d найдено: %d. Попыток: %.2fM, Сравнений: %.1fM. PAF_A[0]=%d, PAF_B[0]=%d\n",
+                                                              n, threadId, n, foundPairsSet.size(),
                                                               totalAttempts.get() / 1_000_000.0, totalComparisons.get() / 1_000_000.0,
                                                               dataA.paf()[0], dataB.paf()[0]);
+
+                                            onPairFoundCallback.accept(foundPair);
+
                                             if (!unlimitedPairs && foundPairsSet.size() >= MAX_UNIQUE_PAIRS_PER_N) {
                                                 break;
                                             }
@@ -266,8 +292,8 @@ public class Main {
                                         break;
                                     }
                                 }
-                                if (MAX_CHECKS_PER_BUCKET_PAIR > 0 && checksInBucketPair >= MAX_CHECKS_PER_BUCKET_PAIR ||
-                                    (!unlimitedPairs && foundPairsSet.size() >= MAX_UNIQUE_PAIRS_PER_N)) {
+                                if ( (MAX_CHECKS_PER_BUCKET_PAIR > 0 && checksInBucketPair >= MAX_CHECKS_PER_BUCKET_PAIR) ||
+                                     (!unlimitedPairs && foundPairsSet.size() >= MAX_UNIQUE_PAIRS_PER_N) ) {
                                     break;
                                 }
                             }
@@ -291,7 +317,7 @@ public class Main {
                 latch.await(200, TimeUnit.MILLISECONDS);
             }
         } catch (InterruptedException e) {
-            System.err.println("\nОсновной поток прерван во время ожидания.");
+            System.err.println("\nОсновной поток прерван во время ожидания для n=" + n);
             Thread.currentThread().interrupt();
             criticalErrorOccurred.set(true);
         }
@@ -299,13 +325,13 @@ public class Main {
         if (System.currentTimeMillis() >= deadline || criticalErrorOccurred.get() || (!unlimitedPairs && foundPairsSet.size() >= MAX_UNIQUE_PAIRS_PER_N)) {
             executor.shutdown();
             try {
-                if (!executor.awaitTermination(500, TimeUnit.MILLISECONDS)) {
+                if (!executor.awaitTermination(1, TimeUnit.SECONDS)) {
                     List<Runnable> droppedTasks = executor.shutdownNow();
                     if (!droppedTasks.isEmpty()) {
-                        System.err.println("Задачи, которые не были выполнены после shutdownNow: " + droppedTasks.size());
+                        System.err.println("Для n=" + n +": Задачи, которые не были выполнены после shutdownNow: " + droppedTasks.size());
                     }
-                    if (!executor.awaitTermination(500, TimeUnit.MILLISECONDS)) {
-                        System.err.println("Пул потоков не завершился.");
+                    if (!executor.awaitTermination(1, TimeUnit.SECONDS)) {
+                        System.err.println("Для n=" + n +": Пул потоков не завершился корректно после shutdownNow.");
                     }
                 }
             } catch (InterruptedException ie) {
@@ -318,12 +344,13 @@ public class Main {
 
 
         long duration = System.currentTimeMillis() - startTime;
-        System.out.printf(" Попыток генерации: %.2fM. Сравнений PAF: %.2fM. Время: %.2fs.",
+        System.out.printf("  Статистика для n=%d: Попыток генерации: %.2fM. Сравнений PAF: %.2fM. Время: %.2fs.",
+                          n,
                           totalAttempts.get() / 1_000_000.0,
                           totalComparisons.get() / 1_000_000.0,
                           duration / 1000.0);
 
-        if (System.currentTimeMillis() >= deadline && !criticalErrorOccurred.get() && (unlimitedPairs ||foundPairsSet.size() < MAX_UNIQUE_PAIRS_PER_N)) {
+        if (System.currentTimeMillis() >= deadline && !criticalErrorOccurred.get() && (unlimitedPairs || foundPairsSet.size() < MAX_UNIQUE_PAIRS_PER_N)) {
             System.out.print(" [Таймаут]");
         }
         if (criticalErrorOccurred.get()) {
@@ -333,6 +360,7 @@ public class Main {
 
         return new ArrayList<>(foundPairsSet);
     }
+
 
     private static boolean checkEulerPairCondition(long[] pafA, long[] pafB, int v) {
         if (pafA == null || pafB == null || pafA.length != v || pafB.length != v) {
@@ -373,9 +401,12 @@ public class Main {
                 if (requiredFftArraySize <= 0) {
                     newBufferLength = 256;
                 } else {
-                    newBufferLength = Integer.highestOneBit(requiredFftArraySize - 1) << 1;
-                    if (newBufferLength == 0) {
+                    newBufferLength = Integer.highestOneBit(requiredFftArraySize -1) << 1;
+                    if (newBufferLength == 0 && requiredFftArraySize > 0) {
                         newBufferLength = 2;
+                    } else if (newBufferLength < requiredFftArraySize) {
+                        newBufferLength = Integer.highestOneBit(requiredFftArraySize) << 1;
+                        if (newBufferLength < requiredFftArraySize) newBufferLength = requiredFftArraySize;
                     }
                 }
                 newBufferLength = Math.max(newBufferLength, requiredFftArraySize);
@@ -384,8 +415,9 @@ public class Main {
                 data = new double[newBufferLength];
                 dataBufferThreadLocal.set(data);
             } else {
-                Arrays.fill(data, 0.0);
+                Arrays.fill(data, 0, Math.min(data.length, requiredFftArraySize * 2), 0.0);
             }
+
 
             for (int i = 0; i < v_len; i++) {
                 data[2 * i] = seq[i];
@@ -401,7 +433,7 @@ public class Main {
             }
 
             if (PSD_FILTER_ENABLED) {
-                double psdThreshold = (double)v_len + PSD_THRESHOLD_ADDITIVE;
+                double psdThreshold = (double)v_len * 2.0 + PSD_THRESHOLD_ADDITIVE;
                 for (int i = 1; i < v_len; i++) {
                     if (data[2 * i] > psdThreshold) {
                         return null;
@@ -421,11 +453,11 @@ public class Main {
             }
             return result;
         } catch (Exception e) {
-            System.err.println("Ошибка при вычислении АКФ для v_len=" + v_len + ": " + e.getMessage());
+            System.err.println("Ошибка при вычислении АКФ для v_len=" + v_len + ": " + e.getMessage() + ". Seq length: " + (seq != null ? seq.length : "null"));
             return null;
         } catch (OutOfMemoryError oom) {
             criticalErrorOccurred.set(true);
-            System.err.println("\nOOM при вычислении АКФ для v_len=" + v_len);
+            System.err.println("\nOOM при вычислении АКФ для v_len=" + v_len + ". Последовательность отброшена. Поиск будет остановлен.");
             throw oom;
         }
     }
