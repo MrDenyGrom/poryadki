@@ -68,8 +68,8 @@ class SequencePair {
 }
 
 public class Main {
-    static final int N_MIN = 62;
-    static final int N_MAX = 62;
+    static final int N_MIN = 222;
+    static final int N_MAX = 222;
     static final int THREADS = Runtime.getRuntime().availableProcessors();
     static final AtomicBoolean criticalErrorOccurred = new AtomicBoolean(false);
 
@@ -88,6 +88,7 @@ public class Main {
     private static final ThreadLocal<double[]> dataBufferThreadLocal = new ThreadLocal<>();
 
     private static int calculateK1(int v) {
+        System.out.println("calculateK1: " + v / 2);
         return v / 2;
     }
 
